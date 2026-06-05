@@ -8,10 +8,8 @@
 
 #import <Cocoa/Cocoa.h>
 
-@interface myOpenGLView : NSView{
+@interface myOpenGLView : NSOpenGLView{
     Boolean isRunning;
     CVDisplayLinkRef displayLink;
 }
-@property NSOpenGLPixelFormat* pixelFormat;
-@property NSOpenGLContext* openGLContext;
 @end

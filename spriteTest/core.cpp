@@ -44,6 +44,17 @@ GLfloat whiteHolePos[2];
 float width;
 float height;
 
+// ---- Quad-based rendering (points are hardware-capped at 64px, so we draw
+//      each particle as an instanced quad instead) ----
+GLuint renderProgram;
+GLuint quadVBO;
+GLuint renderVao[2];
+GLint rSizeLocation;
+GLint rAspectLocation;
+// How big each particle is, in NDC units per unit of `rad`. Raise for a more
+// fluid/overlapping look, lower for distinct dots.
+const float POINT_SIZE_SCALE=34.0f;
+
 void Init(float w, float h){
     width=w;
     height=h;
@@ -153,8 +164,48 @@ void Init(float w, float h){
     
     whiteEnableLocation=glGetUniformLocation(program, "validWhiteHole");
     whiteHoleLocation=glGetUniformLocation(program, "whiteHole");
-    
-    
+
+    // ---- Render program: draws each particle as an instanced quad ----
+    ShaderInfo renderInfo[]{
+        {GL_VERTEX_SHADER, "shader/render.vert"},
+        {GL_FRAGMENT_SHADER, "shader/render.frag"},
+        {GL_NONE, NULL}
+    };
+    renderProgram=LoadShaders(renderInfo);
+    rSizeLocation=glGetUniformLocation(renderProgram, "sizeScale");
+    rAspectLocation=glGetUniformLocation(renderProgram, "aspect");
+    glUseProgram(renderProgram);
+    glUniform1f(rSizeLocation, POINT_SIZE_SCALE);
+
+    // A unit quad as a triangle strip; expanded around each particle in the shader.
+    GLfloat corners[]={ -1,-1,  1,-1,  -1,1,  1,1 };
+    glGenBuffers(1, &quadVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STATIC_DRAW);
+
+    glGenVertexArrays(2, renderVao);
+    for(int i=0; i<2; i++){
+        glBindVertexArray(renderVao[i]);
+        // location 0: the shared quad corners (one per vertex)
+        glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(GLfloat), (GLvoid*)0);
+        glEnableVertexAttribArray(0);
+        glVertexAttribDivisor(0, 0);
+        // locations 1..3: per-instance particle data from the simulated buffer
+        glBindBuffer(GL_ARRAY_BUFFER, buffer[i]);
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Point), (GLvoid*)offsetof(Point, pos));
+        glEnableVertexAttribArray(1);
+        glVertexAttribDivisor(1, 1);
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Point), (GLvoid*)offsetof(Point, color));
+        glEnableVertexAttribArray(2);
+        glVertexAttribDivisor(2, 1);
+        glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(Point), (GLvoid*)offsetof(Point, rad));
+        glEnableVertexAttribArray(3);
+        glVertexAttribDivisor(3, 1);
+    }
+    glBindVertexArray(0);
+    glUseProgram(program);
+
     glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ONE);
     glEnable(GL_BLEND);
 }
@@ -170,26 +221,41 @@ void Draw(uint64_t time){
         pastTime=time;
     }
     float timeDelta=(time-pastTime)/1000.0f;
+
+    // ---- Pass 1: simulation only (transform feedback, no rasterization) ----
+    glUseProgram(program);
     glUniform1f(timeLocation, timeDelta);
     glUniform1i(frameLocation, frame);
     glUniform1f(hLocation, hor);
     glUniform1i(whiteEnableLocation, whiteEnable);
     glUniform2f(whiteHoleLocation, whiteHolePos[0], whiteHolePos[1]);
-    glClear(GL_COLOR_BUFFER_BIT);
-    
+
+    int dst;
     if(frame%2==0){
         glBindVertexArray(vao[0]);
         glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer[1]);
         glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, buffer[0]);
+        dst=1;
     }
     else{
         glBindVertexArray(vao[1]);
         glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, buffer[0]);
         glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA32F, buffer[1]);
+        dst=0;
     }
+    glEnable(GL_RASTERIZER_DISCARD);
     glBeginTransformFeedback(GL_POINTS);
     glDrawArrays(GL_POINTS, 0, nPoint);
     glEndTransformFeedback();
+    glDisable(GL_RASTERIZER_DISCARD);
+
+    // ---- Pass 2: draw the freshly simulated particles as quads ----
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(renderProgram);
+    glUniform1f(rAspectLocation, (width>0.0f) ? height/width : 1.0f);
+    glBindVertexArray(renderVao[dst]);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, nPoint);
+
     pastTime=time;
     frame++;
 }
